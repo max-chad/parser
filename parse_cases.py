@@ -28,6 +28,7 @@ DEFAULT_HEADERS: Mapping[str, str] = {
 
 
 def derive_base_url(url: Optional[str]) -> Optional[str]:
+    """Возвращает базовый URL (схема + хост) из произвольной ссылки."""
     if not url:
         return None
     parsed = urlparse(url)
@@ -42,6 +43,7 @@ def fetch_html_from_url(
     timeout: float = DEFAULT_REQUEST_TIMEOUT,
     headers: Optional[Mapping[str, str]] = None,
 ) -> str:
+    """Скачивает HTML-страницу по URL с нужными заголовками и таймаутом."""
     request_headers: dict[str, str] = dict(DEFAULT_HEADERS)
     if headers:
         request_headers.update(headers)
@@ -56,6 +58,7 @@ def load_html_source(
     url: Optional[str],
     timeout: float,
 ) -> Tuple[str, Optional[str]]:
+    """Загружает HTML из файла или сети и возвращает исходный текст и URL."""
     if url:
         return fetch_html_from_url(url, timeout=timeout), url
 
@@ -72,7 +75,7 @@ def load_html_source(
             return html, DEFAULT_CASES_URL
         raise
 
-
+# Сопоставление номера месяца со всеми встречающимися формами написания.
 MONTH_ALIASES = {
     1: ("январь", "января", "янв"),
     2: ("февраль", "февраля", "фев", "февр"),
@@ -90,11 +93,12 @@ MONTH_ALIASES = {
 
 
 def _normalize_month_token(value: str) -> str:
-    """Return a normalized representation of a Russian month name/abbreviation."""
+    """Возвращает нормализованную форму русского названия месяца."""
     return value.strip().lower().replace("ё", "е").rstrip(".")
 
 
 def _build_month_mapping() -> dict[str, int]:
+    """Строит словарь {нормализованное_название: номер_месяца}."""
     mapping: dict[str, int] = {}
     for month_number, aliases in MONTH_ALIASES.items():
         for alias in aliases:
@@ -102,8 +106,10 @@ def _build_month_mapping() -> dict[str, int]:
     return mapping
 
 
+# Быстрый доступ к номеру месяца по строковому ключу.
 MONTHS_RU = _build_month_mapping()
 
+# Регулярные выражения, покрывающие ISO, dd.mm.yyyy и русские текстовые даты.
 ISO_DATE_RE = re.compile(r"^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})")
 DOT_DATE_RE = re.compile(r"^(?P<day>\d{1,2})[./](?P<month>\d{1,2})[./](?P<year>\d{4})")
 RUSSIAN_TEXT_DATE_RE = re.compile(
@@ -111,6 +117,7 @@ RUSSIAN_TEXT_DATE_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+# Подборка шаблонных заголовков, которые нужно игнорировать.
 GENERIC_TITLE_STRINGS = {
     "подробнее",
     "читать кейс",
@@ -121,7 +128,7 @@ GENERIC_TITLE_STRINGS = {
 
 
 def _iter_strings(value: object | None) -> Iterator[str]:
-    """Yield string values extracted from BeautifulSoup attribute payloads."""
+    """Выдаёт по очереди строковые значения из атрибутов BeautifulSoup."""
 
     if isinstance(value, str):
         yield value
@@ -132,22 +139,24 @@ def _iter_strings(value: object | None) -> Iterator[str]:
 
 
 def _first_string(value: object | None) -> Optional[str]:
+    """Возвращает первую строку из атрибута тега (если она есть)."""
     for item in _iter_strings(value):
         return item
     return None
 
 
 def _clean_text(value: str) -> str:
-    """Collapse common whitespace artifacts produced by HTML parsing."""
+    """Убирает неразрывные ошибки пробелов и мягкие переносы, нормализуя текст."""
     return (
-        value.replace("\u00a0", " ")  # non-breaking space
-        .replace("\u2009", " ")  # thin space
-        .replace("\xad", "")  # soft hyphen
+        value.replace("\u00a0", " ")  # неразрывный пробел
+        .replace("\u2009", " ")  # тонкий пробел
+        .replace("\xad", "")  # мягкий перенос
         .strip()
     )
 
 
 def _normalize_title_text(value: Optional[str]) -> Optional[str]:
+    """Подчищает текст заголовка и отсеивает слишком общие формулировки."""
     if not value:
         return None
     text = _clean_text(value)
@@ -159,7 +168,7 @@ def _normalize_title_text(value: Optional[str]) -> Optional[str]:
 
 
 def normalize_date(raw: Optional[str]) -> Optional[str]:
-    """Convert known date formats to YYYY-MM-DD."""
+    """Преобразует известные форматы дат в строку вида YYYY-MM-DD."""
 
     if not raw:
         return None
@@ -197,6 +206,7 @@ def normalize_date(raw: Optional[str]) -> Optional[str]:
 
 
 def find_case_nodes(soup: BeautifulSoup) -> List[Tag]:
+    """Находит подходящие контейнеры карточек кейсов по нескольким селекторам."""
     selectors = [
         '[data-testid="case-card"]',
         ".CaseCard",
@@ -210,6 +220,7 @@ def find_case_nodes(soup: BeautifulSoup) -> List[Tag]:
 
 
 def extract_title(container: Tag, link: Tag) -> Optional[str]:
+    """Пытается достать заголовок кейса из разных мест карточки."""
     selectors = [
         '[data-testid="case-card-title"]',
         '[itemprop="headline"]',
@@ -256,6 +267,7 @@ def extract_title(container: Tag, link: Tag) -> Optional[str]:
 
 
 def iter_date_texts(container: Tag) -> Iterable[str]:
+    """Генерирует все текстовые кандидаты на дату публикации из карточки."""
     for time_tag in container.find_all("time"):
         for datetime_attr in _iter_strings(time_tag.get("datetime")):
             stripped = _clean_text(datetime_attr)
@@ -274,6 +286,7 @@ def iter_date_texts(container: Tag) -> Iterable[str]:
 
 
 def extract_date(container: Tag) -> Optional[str]:
+    """Возвращает нормализованную дату публикации, если она найдена."""
     for value in iter_date_texts(container):
         normalized = normalize_date(value)
         if normalized:
@@ -282,9 +295,10 @@ def extract_date(container: Tag) -> Optional[str]:
 
 
 def extract_cases(html: str, base_url: str = DEFAULT_BASE_URL) -> List[dict]:
+    """Разбирает HTML-страницу и возвращает список словарей с данными кейсов."""
     soup = BeautifulSoup(html, "html.parser")
     results = []
-    seen_links = set()
+    seen_links = set()  # Не допускаем дубликаты ссылок
 
     for node in find_case_nodes(soup):
         if node.name == "a" and _first_string(node.get("href")):
@@ -320,7 +334,7 @@ def extract_cases(html: str, base_url: str = DEFAULT_BASE_URL) -> List[dict]:
 
 
 def persist_json_payload(payload: str, output_path: Path, *, echo: bool) -> None:
-    """Write JSON payload to disk and optionally mirror it to stdout."""
+    """Записывает JSON на диск и при необходимости дублирует его в stdout."""
 
     output_dir = output_path.parent
     if output_dir and not output_dir.exists():
@@ -332,6 +346,7 @@ def persist_json_payload(payload: str, output_path: Path, *, echo: bool) -> None
 
 
 def parse_args() -> argparse.Namespace:
+    """Создаёт CLI-интерфейс и разбирает аргументы командной строки."""
     parser = argparse.ArgumentParser(
         description="Parse VK Ads cases from a local HTML file or directly from the internet."
     )
@@ -370,6 +385,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Точка входа скрипта: получение источника, парсинг и сохранение JSON."""
     args = parse_args()
     html, source_url = load_html_source(args.input, args.url, args.timeout)
     base_url = args.base_url or derive_base_url(source_url) or DEFAULT_BASE_URL
