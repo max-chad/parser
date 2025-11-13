@@ -3,34 +3,159 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Optional
-from urllib.parse import urljoin
+from typing import Iterable, Iterator, List, Mapping, Optional, Tuple
+from urllib.parse import urljoin, urlparse
 
+import requests
 from bs4 import BeautifulSoup, Tag
 
-MONTHS_RU = {
-    "января": 1,
-    "февраля": 2,
-    "марта": 3,
-    "апреля": 4,
-    "мая": 5,
-    "июня": 6,
-    "июля": 7,
-    "августа": 8,
-    "сентября": 9,
-    "октября": 10,
-    "ноября": 11,
-    "декабря": 12,
+
+DEFAULT_BASE_URL = "https://ads.vk.com"
+DEFAULT_CASES_URL = f"{DEFAULT_BASE_URL}/cases"
+DEFAULT_INPUT_PATH = Path("data/cases.html")
+DEFAULT_OUTPUT_PATH = Path("cases.json")
+DEFAULT_REQUEST_TIMEOUT = 10.0
+DEFAULT_HEADERS: Mapping[str, str] = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
 }
+
+
+def derive_base_url(url: Optional[str]) -> Optional[str]:
+    if not url:
+        return None
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return None
+
+
+def fetch_html_from_url(
+    url: str,
+    *,
+    timeout: float = DEFAULT_REQUEST_TIMEOUT,
+    headers: Optional[Mapping[str, str]] = None,
+) -> str:
+    request_headers: dict[str, str] = dict(DEFAULT_HEADERS)
+    if headers:
+        request_headers.update(headers)
+    response = requests.get(url, timeout=timeout, headers=request_headers)
+    response.raise_for_status()
+    response.encoding = response.encoding or response.apparent_encoding
+    return response.text
+
+
+def load_html_source(
+    input_path: Path,
+    url: Optional[str],
+    timeout: float,
+) -> Tuple[str, Optional[str]]:
+    if url:
+        return fetch_html_from_url(url, timeout=timeout), url
+
+    try:
+        html = input_path.read_text(encoding="utf-8")
+        return html, None
+    except FileNotFoundError:
+        if input_path == DEFAULT_INPUT_PATH:
+            print(
+                f"[parser] Local file {input_path} not found, downloading {DEFAULT_CASES_URL} instead...",
+                file=sys.stderr,
+            )
+            html = fetch_html_from_url(DEFAULT_CASES_URL, timeout=timeout)
+            return html, DEFAULT_CASES_URL
+        raise
+
+
+MONTH_ALIASES = {
+    1: ("январь", "января", "янв"),
+    2: ("февраль", "февраля", "фев", "февр"),
+    3: ("март", "марта", "мар"),
+    4: ("апрель", "апреля", "апр"),
+    5: ("май", "мая"),
+    6: ("июнь", "июня", "июн"),
+    7: ("июль", "июля", "июл"),
+    8: ("август", "августа", "авг"),
+    9: ("сентябрь", "сентября", "сен", "сент"),
+    10: ("октябрь", "октября", "окт"),
+    11: ("ноябрь", "ноября", "ноя", "нояб"),
+    12: ("декабрь", "декабря", "дек"),
+}
+
+
+def _normalize_month_token(value: str) -> str:
+    """Return a normalized representation of a Russian month name/abbreviation."""
+    return value.strip().lower().replace("ё", "е").rstrip(".")
+
+
+def _build_month_mapping() -> dict[str, int]:
+    mapping: dict[str, int] = {}
+    for month_number, aliases in MONTH_ALIASES.items():
+        for alias in aliases:
+            mapping[_normalize_month_token(alias)] = month_number
+    return mapping
+
+
+MONTHS_RU = _build_month_mapping()
 
 ISO_DATE_RE = re.compile(r"^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})")
 DOT_DATE_RE = re.compile(r"^(?P<day>\d{1,2})[./](?P<month>\d{1,2})[./](?P<year>\d{4})")
 RUSSIAN_TEXT_DATE_RE = re.compile(
-    r"^(?P<day>\d{1,2})\s+(?P<month>[а-яА-Я]+)\s+(?P<year>\d{4})",
+    r"(?P<day>\d{1,2})\s+(?P<month>[А-Яа-яёЁ.\-]+)\s+(?P<year>\d{4})(?:\s*(?:г(?:\.|ода)?))?",
     flags=re.IGNORECASE,
 )
+
+GENERIC_TITLE_STRINGS = {
+    "подробнее",
+    "читать кейс",
+    "читать кейс полностью",
+    "читать подробнее",
+    "узнать больше",
+}
+
+
+def _iter_strings(value: object | None) -> Iterator[str]:
+    """Yield string values extracted from BeautifulSoup attribute payloads."""
+
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            if isinstance(item, str):
+                yield item
+
+
+def _first_string(value: object | None) -> Optional[str]:
+    for item in _iter_strings(value):
+        return item
+    return None
+
+
+def _clean_text(value: str) -> str:
+    """Collapse common whitespace artifacts produced by HTML parsing."""
+    return (
+        value.replace("\u00a0", " ")  # non-breaking space
+        .replace("\u2009", " ")  # thin space
+        .replace("\xad", "")  # soft hyphen
+        .strip()
+    )
+
+
+def _normalize_title_text(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    text = _clean_text(value)
+    if not text:
+        return None
+    if text.lower() in GENERIC_TITLE_STRINGS:
+        return None
+    return text
 
 
 def normalize_date(raw: Optional[str]) -> Optional[str]:
@@ -39,7 +164,7 @@ def normalize_date(raw: Optional[str]) -> Optional[str]:
     if not raw:
         return None
 
-    value = raw.strip()
+    value = _clean_text(raw)
     if not value:
         return None
 
@@ -60,7 +185,7 @@ def normalize_date(raw: Optional[str]) -> Optional[str]:
     match = RUSSIAN_TEXT_DATE_RE.search(value)
     if match:
         day = int(match.group("day"))
-        month_name = match.group("month").lower()
+        month_name = _normalize_month_token(match.group("month"))
         month = MONTHS_RU.get(month_name)
         year = int(match.group("year"))
         if month:
@@ -74,7 +199,7 @@ def normalize_date(raw: Optional[str]) -> Optional[str]:
 def find_case_nodes(soup: BeautifulSoup) -> List[Tag]:
     selectors = [
         '[data-testid="case-card"]',
-        '.CaseCard',
+        ".CaseCard",
         'a[href*="/cases/"]',
     ]
     for selector in selectors:
@@ -87,36 +212,63 @@ def find_case_nodes(soup: BeautifulSoup) -> List[Tag]:
 def extract_title(container: Tag, link: Tag) -> Optional[str]:
     selectors = [
         '[data-testid="case-card-title"]',
-        '.CaseCard__title',
-        '.vkuiHeadline',
-        'h3',
-        'h2',
-        'span',
-        'div',
+        '[itemprop="headline"]',
+        '[itemprop="name"]',
+        '[class*="case-card_title"]',
+        '[class*="CaseCard__title"]',
+        ".CaseCard__title",
+        ".vkuiHeadline",
+        "h1",
+        "h3",
+        "h2",
     ]
     for selector in selectors:
         candidate = container.select_one(selector)
-        if candidate and candidate.get_text(strip=True):
-            return candidate.get_text(strip=True)
-    text = link.get_text(" ", strip=True)
-    return text or None
+        if candidate:
+            title = _normalize_title_text(candidate.get_text(" ", strip=True))
+            if title:
+                return title
+
+    for attr in ("title", "aria-label", "aria-labelledby", "data-title"):
+        title = _normalize_title_text(_first_string(link.get(attr)))
+        if title:
+            return title
+
+    for candidate in container.find_all(True):
+        if candidate.name == "button" or candidate.find_parent("button"):
+            continue
+        role = (_first_string(candidate.get("role")) or "").lower()
+        if role == "button":
+            continue
+        class_tokens = " ".join(_iter_strings(candidate.get("class"))).lower()
+        data_test_id = (_first_string(candidate.get("data-testid")) or "").lower()
+        if (
+            candidate.name in {"h1", "h2", "h3", "h4"}
+            or "title" in class_tokens
+            or "headline" in class_tokens
+            or "title" in data_test_id
+        ):
+            title = _normalize_title_text(candidate.get_text(" ", strip=True))
+            if title:
+                return title
+
+    return None
 
 
 def iter_date_texts(container: Tag) -> Iterable[str]:
     for time_tag in container.find_all("time"):
-        datetime_attr = time_tag.get("datetime")
-        if datetime_attr:
-            yield datetime_attr
-        text = time_tag.get_text(strip=True)
+        for datetime_attr in _iter_strings(time_tag.get("datetime")):
+            stripped = _clean_text(datetime_attr)
+            if stripped:
+                yield stripped
+        text = _clean_text(time_tag.get_text())
         if text:
             yield text
     for tag in container.find_all(True):
-        if tag is None:
-            continue
-        attrs = " ".join(tag.get("class", []))
-        data_test_id = tag.get("data-testid", "")
-        if "date" in attrs.lower() or "date" in data_test_id.lower():
-            text = tag.get_text(strip=True)
+        attrs = " ".join(_iter_strings(tag.get("class"))).lower()
+        data_test_id = (_first_string(tag.get("data-testid")) or "").lower()
+        if "date" in attrs or "date" in data_test_id:
+            text = _clean_text(tag.get_text())
             if text:
                 yield text
 
@@ -129,23 +281,23 @@ def extract_date(container: Tag) -> Optional[str]:
     return None
 
 
-def extract_cases(html: str, base_url: str = "https://ads.vk.com") -> List[dict]:
+def extract_cases(html: str, base_url: str = DEFAULT_BASE_URL) -> List[dict]:
     soup = BeautifulSoup(html, "html.parser")
     results = []
     seen_links = set()
 
     for node in find_case_nodes(soup):
-        link_tag: Optional[Tag]
-        if node.name == "a" and node.get("href"):
-            link_tag = node
+        if node.name == "a" and _first_string(node.get("href")):
+            link_tag: Optional[Tag] = node
         else:
             link_tag = node.find("a", href=True)
         if not link_tag:
             continue
 
-        href = link_tag.get("href")
+        href = _first_string(link_tag.get("href"))
         if not href:
             continue
+
         absolute_url = urljoin(base_url, href)
         if absolute_url in seen_links:
             continue
@@ -167,39 +319,65 @@ def extract_cases(html: str, base_url: str = "https://ads.vk.com") -> List[dict]
     return results
 
 
+def persist_json_payload(payload: str, output_path: Path, *, echo: bool) -> None:
+    """Write JSON payload to disk and optionally mirror it to stdout."""
+
+    output_dir = output_path.parent
+    if output_dir and not output_dir.exists():
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path.write_text(payload, encoding="utf-8")
+    if echo:
+        print(payload)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Parse VK Ads cases from a saved HTML page."
+        description="Parse VK Ads cases from a local HTML file or directly from the internet."
     )
-    parser.add_argument(
+    source_group = parser.add_mutually_exclusive_group()
+    source_group.add_argument(
         "--input",
         type=Path,
-        default=Path("data/cases.html"),
-        help="Path to the saved HTML file (default: data/cases.html)",
+        default=DEFAULT_INPUT_PATH,
+        metavar="PATH",
+        help="Path to the saved HTML file (default: data/cases.html).",
+    )
+    source_group.add_argument(
+        "--url",
+        metavar="URL",
+        help="URL to download the HTML page from.",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        help="Optional path to save the JSON result. If omitted, the JSON is printed.",
+        help=(
+            "Path to save the JSON result. When omitted, cases.json is created and the JSON is also printed."
+        ),
     )
     parser.add_argument(
         "--base-url",
-        default="https://ads.vk.com",
-        help="Base URL used to resolve relative links.",
+        default=None,
+        help="Base URL used to resolve relative links. Defaults to the source host or https://ads.vk.com.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_REQUEST_TIMEOUT,
+        help=f"HTTP timeout in seconds when --url is used (default: {DEFAULT_REQUEST_TIMEOUT}).",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    html = args.input.read_text(encoding="utf-8")
-    cases = extract_cases(html, base_url=args.base_url)
+    html, source_url = load_html_source(args.input, args.url, args.timeout)
+    base_url = args.base_url or derive_base_url(source_url) or DEFAULT_BASE_URL
+    cases = extract_cases(html, base_url=base_url)
     payload = json.dumps(cases, ensure_ascii=False, indent=2)
 
-    if args.output:
-        args.output.write_text(payload, encoding="utf-8")
-    else:
-        print(payload)
+    output_path = args.output or DEFAULT_OUTPUT_PATH
+    persist_json_payload(payload, output_path, echo=args.output is None)
 
 
 if __name__ == "__main__":

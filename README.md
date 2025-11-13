@@ -1,68 +1,71 @@
-# VK Ads Case Parser
+﻿# VK Ads Case Parser
 
-Этот проект демонстрирует, как с помощью библиотеки [BeautifulSoup](https://www.crummy.com/software/BeautifulSoup/) извлечь данные из сохранённой HTML-страницы с кейсами рекламы VK. Скрипт считывает локальный файл, находит карточки бизнес-кейсов и преобразует информацию в удобную структуру данных Python.
+Small, typed CLI utility that extracts case studies from https://ads.vk.com/cases, normalizes their publish dates, and emits clean JSON that can be ingested by dashboards, CMSs, or internal tooling. Under the hood it relies on `requests` for fetching pages and BeautifulSoup for resilient HTML traversal.
 
-## Структура проекта
+## Features
+- Always writes the parsed payload to `cases.json` (or a custom `--output` path) and mirrors it to stdout for piping.
+- Parses saved HTML files or downloads the page on demand with retry-friendly headers and timeouts.
+- Dedupe logic keyed by absolute case URLs to avoid duplicates across columns/sections.
+- Smart Russian date normalizer that accepts ISO, dotted, slashed, and textual formats.
+- Optional CLI flags for overriding base URLs, output paths, and HTTP timeouts.
+- Comes with pytest coverage that mocks the network layer for deterministic runs.
 
-- `data/cases.html` — сохранённый HTML-файл страницы кейсов.
-- `parse_cases.py` — скрипт для извлечения информации о кейсах.
-- `requirements.txt` — список зависимостей проекта.
-- `.gitignore` — исключает временные файлы и виртуальные окружения из Git.
+## Requirements
+- Python **3.10+**
+- `pip` or any PEP-517 compatible installer
 
-## Установка
-
-1. Создайте и активируйте виртуальное окружение (по желанию):
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # для Windows используйте .venv\Scripts\activate
-   ```
-2. Установите зависимости:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-## Запуск
-
-По умолчанию скрипт ожидает, что файл `data/cases.html` находится в корне репозитория. Запустите его следующей командой:
-
+## Installation
 ```bash
-python parse_cases.py
+python -m venv .venv
+.venv\Scripts\activate          # On PowerShell; use source .venv/bin/activate on *nix
+pip install -r requirements.txt   # or: pip install .[dev]
 ```
 
-Параметры командной строки:
-
-- `--input` — путь к сохранённому HTML-файлу (по умолчанию `data/cases.html`).
-- `--output` — путь для сохранения результата в JSON-файл. Если параметр не указан, результат выводится в stdout.
-- `--base-url` — базовый URL для формирования абсолютных ссылок (по умолчанию `https://ads.vk.com`).
-
-Пример записи результата в файл:
-
+## Usage
+### Parse a saved HTML dump
 ```bash
-python parse_cases.py --output cases.json
+python parse_cases.py --input data/cases.html --output cases.json
 ```
+If `--output` is omitted the JSON payload is still printed *and* written to `cases.json` in the current directory.
 
-## Пример вывода
+### Fetch straight from VK Ads
+```bash
+python parse_cases.py --url https://ads.vk.com/cases --timeout 15 --output custom.json
+```
+When `--input` is missing and no URL is supplied, the script automatically downloads https://ads.vk.com/cases and keeps working. The base URL is derived from the response host, so relative links always get resolved correctly.
 
+### Example payload
 ```json
 [
   {
-    "title": "Selgros: промо с лид-формами",
-    "url": "https://ads.vk.com/cases/selgros-promo",
-    "published_at": "2024-08-20"
-  },
-  {
-    "title": "Foodfox: увеличение продаж на доставку",
-    "url": "https://ads.vk.com/cases/foodfox-performance",
-    "published_at": "2023-11-15"
-  },
-  {
-    "title": "TechBrand: узнаваемость нового продукта",
-    "url": "https://ads.vk.com/cases/techbrand-awareness",
-    "published_at": "2022-07-05"
+    "title": "Сборный кейс",
+    "url": "https://ads.vk.com/cases/example-case",
+    "published_at": "2024-09-21"
   }
 ]
 ```
 
-## Лицензия
+## Running the tests
+```bash
+pip install .[dev]
+pytest
+```
 
-Проект распространяется по лицензии MIT. См. файл [LICENSE](LICENSE) (при необходимости).
+## Project layout
+- parse_cases.py — CLI entry point plus all parsing helpers.
+- tests/ — pytest suite covering parsing helpers and I/O fallbacks.
+- requirements.txt / pyproject.toml — dependency declarations for pip and PEP-621 installers.
+- LICENSE — MIT license.
+
+## Publishing checklist
+1. Update pyproject.toml with the desired version number.
+2. Run pytest to make sure the parsing helpers still behave.
+3. Build and upload (optional):
+   ```bash
+   pip install build twine
+   python -m build
+   python -m twine upload dist/*
+   ```
+
+## License
+The project is distributed under the MIT License. See LICENSE for the full text.
